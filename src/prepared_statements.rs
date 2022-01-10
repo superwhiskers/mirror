@@ -39,11 +39,15 @@ pub static PREPARED_STATEMENTS: Lazy<Map<PreparedStatementKey, &str>> = Lazy::ne
     );
     map.insert(
         PreparedStatementKey::IsUserBanned,
-        "SELECT COUNT(*) FROM roles WHERE mirror_channel = ? AND user = ? AND role = 'banned' ALLOW FILTERING",
+        "SELECT COUNT(*) FROM roles WHERE mirror_channel = ? AND user = ? AND role = 'banned'",
     );
     map.insert(
         PreparedStatementKey::IsUserBannedInScope,
-        "SELECT COUNT(*) FROM roles WHERE mirror_channel = ? AND user = ? AND scope = ? AND role = 'banned' ALLOW FILTERING",
+        "SELECT COUNT(*) FROM roles WHERE mirror_channel = ? AND user = ? AND scope = ? AND role = 'banned'",
+    );
+    map.insert(
+        PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService,
+        "SELECT username FROM usercache WHERE user = ? AND service = ?",
     );
 
     map
@@ -56,4 +60,5 @@ pub enum PreparedStatementKey {
     GetUserRolesInScope,
     IsUserBanned,
     IsUserBannedInScope,
+    FetchUsernameFromUsercacheByUserAndService,
 }

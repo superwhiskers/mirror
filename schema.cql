@@ -2,6 +2,8 @@ CREATE KEYSPACE IF NOT EXISTS mirrorbot
 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
 AND durable_writes = true;
 
+USE mirrorbot;
+
 CREATE TABLE IF NOT EXISTS mirror_channels (
     id uuid,
     friendly_name text,
@@ -25,9 +27,12 @@ CREATE TABLE IF NOT EXISTS roles (
     PRIMARY KEY (mirror_channel, user, scope)
 );
 
+CREATE INDEX ON roles((mirror_channel), role);
+
 CREATE TABLE IF NOT EXISTS usercache (
     user text,
+    service text,
     username text,
     avatar blob,
-    PRIMARY KEY (user)
+    PRIMARY KEY (service, user)
 );

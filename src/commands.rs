@@ -45,7 +45,7 @@ pub async fn about_handler(
                 allowed_mentions: None,
                 components: None,
                 content: Some("hello!".to_string()),
-                embeds: Vec::new(),
+                embeds: None,
                 flags: None,
                 tts: None,
             }),
