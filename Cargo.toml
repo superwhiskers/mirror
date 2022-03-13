@@ -19,12 +19,12 @@ panic = "abort"
 lto = "fat"
 
 [dependencies]
-twilight-model = "0.8"
-twilight-cache-inmemory = "0.8"
-twilight-embed-builder = "0.8"
-twilight-mention = "0.8"
+twilight-model = "0.9"
+twilight-cache-inmemory = "0.9"
+twilight-embed-builder = "0.9"
+twilight-mention = "0.9"
 serde = "1"
-rmp-serde = "0.15"
+rmp-serde = "1"
 anyhow = "1"
 futures = "0.3"
 thiserror = "1"
@@ -44,7 +44,7 @@ version = "0.4"
 features = [ "tokio" ]
 
 [dependencies.scylla]
-version = "0.3"
+version = "0.4"
 features = [ "ssl" ]
 
 [dependencies.uuid]
@@ -70,11 +70,11 @@ default-features = false
 features = ["rt_tokio_1"]
 
 [dependencies.twilight-http]
-version = "0.8"
+version = "0.9"
 features = ["simd-json", "trust-dns"]
 
 [dependencies.twilight-gateway]
-version = "0.8"
+version = "0.9"
 features = ["simd-json", "zlib-simd"]
 
 [dependencies.tokio]

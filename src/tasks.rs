@@ -77,6 +77,10 @@ pub enum MirrorTaskError {
     #[error("The database returned nothing when queried for the amount of bans a user has")]
     NothingReturnedWhenQueryingUserBans,
 
+    /// The database returned a row with an [`IdentifierKind`] that does not make sense in the usercache
+    #[error("The database returned a row with an originating service that does not make sense in the usercache")]
+    NonsensicalIdentifierKindInUsercache,
+
     /// An error that may arise when creating a message
     #[error("An error was encountered while creating a message")]
     TwilightCreateMessageError(#[from] CreateMessageError),
@@ -307,7 +311,7 @@ pub async fn mirroring(
                                 )
                                 .await?
                                 .rows
-                                .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
+                                .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
                                 .pop()
                                 .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
                                 .into_typed::<(i64,)>()?
@@ -318,6 +322,20 @@ pub async fn mirroring(
                                     "sending message, author: {}, content: `{}`",
                                     author, content
                                 );
+
+                                scylla
+                                    .execute(
+                                        prepared_statements
+                                            .get(PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService)
+                                            .ok_or(MirrorTaskError::NoPreparedStatement(
+                                                PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService
+                                            ))?,
+                                            (match &author {
+                                                Identifier::Discord(id) => id.to_string(),
+                                                _ => return Err(MirrorTaskError::NonsensicalIdentifierKindInUsercache),
+                                            }, author.kind().as_str())
+                                    ).await?
+                                    .rows; //TODO(superwhiskers): find a way to handle this cleanly---probably through a branching path
 
                                 http_client
                                     .create_message(service_channel)

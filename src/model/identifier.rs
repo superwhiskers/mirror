@@ -30,6 +30,29 @@ use std::{
 use thiserror::Error;
 use twilight_model::id::GenericId;
 
+/// The service associated with an [`Identifier`]
+#[non_exhaustive]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+pub enum IdentifierKind {
+    Discord,
+    MirrorChannel,
+}
+
+impl IdentifierKind {
+    pub fn as_str(&self) -> &str {
+        match &self {
+            Self::Discord => "discord",
+            Self::MirrorChannel => "messages",
+        }
+    }
+}
+
+impl Display for IdentifierKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// An identifier stored in mirror's database
 #[non_exhaustive]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -39,6 +62,15 @@ pub enum Identifier<'a> {
 
     /// An identifier for a mirror channel
     MirrorChannel(Cow<'a, str>),
+}
+
+impl<'a> Identifier<'a> {
+    pub fn kind(&self) -> IdentifierKind {
+        match &self {
+            Self::Discord(_) => IdentifierKind::Discord,
+            Self::MirrorChannel(_) => IdentifierKind::MirrorChannel,
+        }
+    }
 }
 
 impl<'a> FromCqlVal<CqlValue> for Identifier<'a> {
