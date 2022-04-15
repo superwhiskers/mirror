@@ -17,12 +17,13 @@
 //
 
 use anyhow::Result;
-use std::sync::Arc;
-use twilight_http::Client;
-use twilight_model::application::{
-    callback::{CallbackData, InteractionResponse},
-    command::{CommandOption, CommandType},
-    interaction::application_command::ApplicationCommand,
+use twilight_http::client::InteractionClient;
+use twilight_model::{
+    application::{
+        command::{CommandOption, CommandType},
+        interaction::application_command::ApplicationCommand,
+    },
+    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
 };
 
 pub struct Command<'a> {
@@ -33,22 +34,29 @@ pub struct Command<'a> {
     pub kind: CommandType,
 }
 
-pub async fn about_handler(
-    client: Arc<Client>,
+pub async fn about_handler<'a>(
+    client: &InteractionClient<'a>,
     interaction: Box<ApplicationCommand>,
 ) -> Result<()> {
     client
-        .interaction_callback(
+        .create_response(
             interaction.id,
             &interaction.token,
-            &InteractionResponse::ChannelMessageWithSource(CallbackData {
-                allowed_mentions: None,
-                components: None,
-                content: Some("hello!".to_string()),
-                embeds: None,
-                flags: None,
-                tts: None,
-            }),
+            &InteractionResponse {
+                kind: InteractionResponseType::ChannelMessageWithSource,
+                data: Some(InteractionResponseData {
+                    allowed_mentions: None,
+                    components: None,
+                    content: Some("hello!".to_string()),
+                    embeds: None,
+                    flags: None,
+                    tts: None,
+                    attachments: None,
+                    choices: None,
+                    custom_id: None,
+                    title: None,
+                }),
+            },
         )
         .exec()
         .await?;

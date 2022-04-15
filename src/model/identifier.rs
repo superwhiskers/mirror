@@ -28,7 +28,7 @@ use std::{
     str::FromStr,
 };
 use thiserror::Error;
-use twilight_model::id::GenericId;
+use twilight_model::id::{marker::GenericMarker, Id};
 
 /// The service associated with an [`Identifier`]
 #[non_exhaustive]
@@ -58,7 +58,7 @@ impl Display for IdentifierKind {
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub enum Identifier<'a> {
     /// An identifier used on the Discord platform
-    Discord(GenericId),
+    Discord(Id<GenericMarker>),
 
     /// An identifier for a mirror channel
     MirrorChannel(Cow<'a, str>),
@@ -85,7 +85,7 @@ impl<'a> FromStr for Identifier<'a> {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.split_once('-') {
-            Some(("discord", id)) => Self::Discord(GenericId(NonZeroU64::from_str(id)?)),
+            Some(("discord", id)) => Self::Discord(id.parse()?),
             Some(("messages", id)) => Self::MirrorChannel(Cow::Owned(id.to_string())),
             Some((service, _)) => {
                 // i personally don't like the allocation here--i think it should be removed at
@@ -101,7 +101,7 @@ impl<'a> FromStr for Identifier<'a> {
 impl<'a> Display for Identifier<'a> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
-            Self::Discord(GenericId(id)) => write!(formatter, "discord-{}", id),
+            Self::Discord(id) => write!(formatter, "discord-{}", id),
             Self::MirrorChannel(name) => write!(formatter, "messages-{}", name),
         }
     }

@@ -43,7 +43,7 @@
 #![deny(clippy::single_match_else)]
 #![deny(clippy::option_option)]
 #![deny(clippy::mut_mut)]
-#![feature(async_closure)]
+#![feature(try_blocks)]
 
 use anyhow::{Context, Result};
 use futures::{
@@ -64,11 +64,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 use tracing_log::LogTracer;
 use tracing_subscriber::FmtSubscriber;
-use twilight_model::{
-    application::interaction::Interaction,
-    gateway::event::Event,
-    id::{ChannelId, GenericId},
-};
+use twilight_model::{application::interaction::Interaction, gateway::event::Event};
 use uuid::{adapter::Simple as SimpleUuidAdapter, Uuid};
 
 mod commands;
@@ -152,7 +148,7 @@ async fn main() -> Result<()> {
             "",
             "messages.messages-test",
             lapin::options::BasicPublishOptions::default(),
-            rmp_serde::to_vec(&model::rabbitmq::MirrorChannelStreamUpdate::Message {
+            &rmp_serde::to_vec(&model::rabbitmq::MirrorChannelStreamUpdate::Message {
                 author: model::identifier::Identifier::MirrorChannel("test".into()),
                 content: "whatever".into(),
             })?,
@@ -163,9 +159,10 @@ async fn main() -> Result<()> {
     //TODO(superwhiskers): finish handling this
     let (scylla, prepared_statements) = init::scylla(&config).await?;
 
-    let (http_client, _application_info) = init::discord_http(&config).await?;
+    let (http_client, application_info) = init::discord_http(&config).await?;
+    let interaction_client = http_client.interaction(application_info.id);
 
-    init::discord_commands(Arc::clone(&http_client)).await?;
+    init::discord_commands(&interaction_client, &application_info).await?;
 
     let (mut cluster, mut events) = init::discord_gateway(&config).await?;
 
@@ -216,7 +213,8 @@ async fn main() -> Result<()> {
 
     //TODO(superwhiskers): consume from the queue and cancel consuming once we are done with
     //                     it
-    let _node_queue_handle = tokio::spawn(
+    let _node_queue_handle = tokio::spawn(tasks::node_queue(
+        node_id,
         rabbitmq_channel
             .basic_consume(
                 node_id_rabbitmq_queue,
@@ -224,125 +222,19 @@ async fn main() -> Result<()> {
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
-            .await?
-            .for_each_concurrent(None, move |potential_update| {
-                match potential_update {
-                    Ok((rabbitmq_channel, potential_update)) => {
-                        let update = rmp_serde::from_read::<_, NodeQueueUpdate>(potential_update.data.as_slice());
-                        trace!("received node queue update event: {:?}", update);
-
-                        match update {
-                            Ok(update) => match update {
-                                NodeQueueUpdate::EndTask {
-                                    to: Identifier::MirrorChannel(mirror_channel),
-                                    from: Identifier::Discord(GenericId(discord_identifier)),
-                                    node_id,
-                                } => {
-                                    //TODO(superwhiskers): implement the handling of requests
-                                    //                     to end publishing tasks. do not forget to ignore those from our own node
-                                    warn!("ending publishing tasks is not supported yet, ignoring");
-                                    rabbitmq_channel
-                                            .basic_nack(potential_update.delivery_tag, BasicNackOptions::default())
-                                            .unwrap_or_else(|err| {
-                                                error!(
-                                                    "unable to negative-acknowledge a NodeQueueUpdate::EndTask for a publishing task, error: {}",
-                                                    err,
-                                                )
-                                            })
-                                            .boxed()
-                                },
-                                NodeQueueUpdate::EndTask {
-                                    to: Identifier::Discord(GenericId(discord_identifier)),
-                                    from: Identifier::MirrorChannel(mirror_channel),
-                                    node_id: origin_node_id,
-                                } => {
-                                    if origin_node_id == node_id {
-                                        debug!("received a NodeQueueUpdate::EndTask for our own node");
-                                        rabbitmq_channel
-                                            .basic_nack(potential_update.delivery_tag, BasicNackOptions::default())
-                                            .unwrap_or_else(|err| {
-                                                error!(
-                                                    "unable to negative-acknowledge a NodeQueueUpdate::EndTask for a publishing task, error: {}",
-                                                    err,
-                                                )
-                                            })
-                                            .boxed()
-                                    } else {
-                                        rabbitmq_channel
-                                            .basic_ack(
-                                                    potential_update.delivery_tag,
-                                                    BasicAckOptions::default(),
-                                            )
-                                            .err_into::<anyhow::Error>()
-                                            .and_then({
-                                                let mirror_manager_channel = mirror_manager_channel.clone();
-                                                let mirror_channel = mirror_channel.clone();
-                                                move |_| {
-                                                    future::ready(mirror_manager_channel
-                                                        .send(
-                                                            MirrorTaskSubscriptionUpdate::Remove(
-                                                                ChannelId(discord_identifier),
-                                                                mirror_channel.to_string()
-                                                            )
-                                                        ))
-                                                        .err_into()
-                                                }
-                                            })
-                                            .unwrap_or_else(move |err| {
-                                                error!(
-                                                    "unable to end a mirroring task, to: {}, from: {}, error: {}",
-                                                    discord_identifier,
-                                                    mirror_channel,
-                                                    err,
-                                                )
-                                            })
-                                            .boxed()
-                                    }
-                                },
-                                NodeQueueUpdate::EndTask { to, from, node_id } => {
-                                    error!(
-                                        "unsupported to/from pair in a NodeQueueUpdate::EndTask, to: {}, from: {}",
-                                        to,
-                                        from
-                                    );
-                                    rabbitmq_channel
-                                            .basic_nack(potential_update.delivery_tag, BasicNackOptions::default())
-                                            .unwrap_or_else(|err| {
-                                                error!(
-                                                    "unable to negative-acknowledge a malformed NodeQueueUpdate::EndTask, error: {}",
-                                                    err,
-                                                )
-                                            })
-                                            .boxed()
-                                },
-                            },
-
-                            Err(err) => {
-                                error!("unable to parse data sent over the node queue, error: {}, data: {:?}", err, potential_update);
-                                rabbitmq_channel
-                                        .basic_nack(potential_update.delivery_tag, BasicNackOptions::default())
-                                        .unwrap_or_else(|err| error!("unable to negative-acknowledge malformed data sent over the node queue, error: {}", err))
-                                        .boxed()
-                            },
-                        }
-                    }
-
-                    Err(err) => {
-                        error!("unable to consume messages from the node queue, error: {}", err);
-                        future::ready(())
-                            .boxed()
-                    },
-                }
-            }),
-    );
+            .await?,
+        mirror_manager_channel,
+    ));
 
     //TODO(superwhiskers): move this outside of main() and spawn it with tokio::spawn(),
     //                     managing the asynchronous execution of it using the handle and
     //                     killing it on a signal such as SIGINT, SIGTERM, or SIGQUIT.
     //
-    //                    consider also handling SIGHUP and respond by reconnecting to
+    //                     consider also handling SIGHUP and respond by reconnecting to
     //                     discord
     //
+    //                     https://docs.rs/tokio/latest/tokio/signal/windows/struct.CtrlC.html
+    //                     or
     //                     https://docs.rs/signal-hook-tokio/0.3.0/signal_hook_tokio/index.html
     //                     will likely be the library used for handling this
 
@@ -359,7 +251,7 @@ async fn main() -> Result<()> {
                     match interaction.data.name.as_str() {
                         "about" => {
                             if let Err(err) =
-                                commands::about_handler(Arc::clone(&http_client), interaction).await
+                                commands::about_handler(&interaction_client, interaction).await
                             {
                                 error!(
                                     "unable to complete execution of the about command: {}",

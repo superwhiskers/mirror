@@ -20,14 +20,17 @@ use backoff::{
     exponential::ExponentialBackoff, future::retry_notify, Error as BackoffError, SystemClock,
 };
 use deadpool_lapin::{Pool as LapinPool, PoolError as LapinPoolError};
-use futures::{future::TryFutureExt, stream::TryStreamExt};
+use futures::{
+    future::TryFutureExt,
+    stream::{StreamExt, TryStreamExt},
+};
 use lapin::{
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
         BasicQosOptions, ExchangeDeclareOptions,
     },
     types::FieldTable,
-    BasicProperties, Error as LapinError, ExchangeKind,
+    BasicProperties, Consumer, Error as LapinError, ExchangeKind,
 };
 use rmp_serde::{decode::Error as RmpDecodeError, encode::Error as RmpEncodeError};
 use scylla::{
@@ -47,11 +50,9 @@ use tokio::{
 };
 use tracing::{debug, error, trace, warn};
 use twilight_gateway::cluster::Cluster;
-use twilight_http::{
-    request::channel::message::create_message::CreateMessageError, Client as HttpClient,
-    Error as TwilightHttpError,
-};
-use twilight_model::id::{ChannelId, GenericId};
+use twilight_http::{error::Error as TwilightHttpError, Client as HttpClient};
+use twilight_model::id::{marker as id_marker, Id};
+use twilight_validate::message::MessageValidationError as TwilightMessageValidationError;
 
 use crate::{
     model::{
@@ -64,7 +65,7 @@ use crate::{
 
 /// A signal to drop the mirroring task associated with the (discord channel, mirror channel) pair
 /// and handle the error, whatever it may be
-pub struct ErroredMirrorTask(ChannelId, String, MirrorTaskError);
+pub struct ErroredMirrorTask(Id<id_marker::ChannelMarker>, String, MirrorTaskError);
 
 /// An enumeration over possible return values from mirroring tasks
 #[derive(Error, Debug)]
@@ -81,13 +82,13 @@ pub enum MirrorTaskError {
     #[error("The database returned a row with an originating service that does not make sense in the usercache")]
     NonsensicalIdentifierKindInUsercache,
 
-    /// An error that may arise when creating a message
-    #[error("An error was encountered while creating a message")]
-    TwilightCreateMessageError(#[from] CreateMessageError),
-
     /// An error that may arise when using the twilight http client
     #[error("An error was encountered while working with the twilight http client")]
     TwilightHttpError(#[from] TwilightHttpError),
+
+    /// An error that may arise when validating Discord request parameters
+    #[error("An error was encountered while validating Discord request parameters")]
+    TwilightMessageValidationError(#[from] TwilightMessageValidationError),
 
     /// The [`PreparedStatements`] map lacks a key
     #[error("The `PreparedStatements` map lacks the `{0:?}` key")]
@@ -123,11 +124,11 @@ pub enum MirrorTaskError {
 pub enum MirrorTaskSubscriptionUpdate {
     /// Add the specified discord channel to the subscription list for the
     /// specified mirror channel
-    Add(ChannelId, String),
+    Add(Id<id_marker::ChannelMarker>, String),
 
     /// Remove the specified discord channel from the subscription list for
     /// the specified mirror channel
-    Remove(ChannelId, String),
+    Remove(Id<id_marker::ChannelMarker>, String),
 
     /// Stop all asynchronous mirroring tasks and exit
     Stop,
@@ -139,12 +140,117 @@ pub enum MirrorTaskSubscriptionUpdate {
 pub enum StoppedMirrorTasksUpdate {
     /// Add the specified task information to the list of tasks that were asked to stop
     Add {
-        channel: (ChannelId, String),
+        channel: (Id<id_marker::ChannelMarker>, String),
         task: JoinHandle<()>,
     },
 
     /// Finish up waiting on stopped tasks and exit
     Stop,
+}
+
+pub async fn node_queue(
+    node_id: &str,
+    mut consumer: Consumer,
+    mirror_manager_channel: mpsc::UnboundedSender<MirrorTaskSubscriptionUpdate>,
+) {
+    while let Some(potential_update) = consumer.next().await {
+        match potential_update {
+            Ok(potential_update) => {
+                let update =
+                    rmp_serde::from_read::<_, NodeQueueUpdate>(potential_update.data.as_slice());
+                trace!("received node queue update event: {:?}", update);
+
+                match update {
+                    Ok(update) => match update {
+                        NodeQueueUpdate::EndTask {
+                            to: Identifier::MirrorChannel(mirror_channel),
+                            from: Identifier::Discord(discord_identifier),
+                            node_id,
+                        } => {
+                            //TODO(superwhiskers): implement the handling of requests
+                            //                     to end publishing tasks. do not forget to ignore those from our own node
+                            warn!("ending publishing tasks is not supported yet, ignoring");
+                            if let Err(err) =
+                                potential_update.nack(BasicNackOptions::default()).await
+                            {
+                                error!("unable to negative-acknowledge a NodeQueueUpdate::EndTask for a publishing task, error: {}", err);
+                            }
+                        }
+                        NodeQueueUpdate::EndTask {
+                            to: Identifier::Discord(discord_identifier),
+                            from: Identifier::MirrorChannel(mirror_channel),
+                            node_id: origin_node_id,
+                        } => {
+                            if origin_node_id == node_id {
+                                debug!("received a NodeQueueUpdate::EndTask for a mirroring task from our own node");
+                                if let Err(err) =
+                                    potential_update.nack(BasicNackOptions::default()).await
+                                {
+                                    error!("unable to negative-acknowledge a NodeQueueUpdate::EndTask for a mirroring task, error: {}", err);
+                                }
+                            } else {
+                                match potential_update.ack(BasicAckOptions::default()).await {
+                                    Ok(_) => {
+                                        if let Err(err) = mirror_manager_channel
+                                            .send(MirrorTaskSubscriptionUpdate::Remove(
+                                                discord_identifier.cast(),
+                                                mirror_channel.to_string(),
+                                            )) {
+                                            error!(
+                                                "unable to send a request to end a mirroring task, to: {}, from: {}, origin: {}, error: {}",
+                                                discord_identifier,
+                                                mirror_channel,
+                                                origin_node_id,
+                                                err,
+                                            )
+                                        }
+                                    }
+                                    Err(err) => error!("unable to acknowledge a NodeQueueUpdate::EndTask for a mirroring task, error: {}", err),
+                                }
+                            }
+                        }
+                        NodeQueueUpdate::EndTask {
+                            to,
+                            from,
+                            node_id: origin_node_id,
+                        } => {
+                            error!(
+                                "unsupported to/from pair in a NodeQueueUpdate::EndTask, to: {}, from: {}, origin: {}",
+                                to,
+                                from,
+                                origin_node_id,
+                            );
+                            if let Err(err) =
+                                potential_update.nack(BasicNackOptions::default()).await
+                            {
+                                error!(
+                                    "unable to negative-acknowledge a malformed NodeQueueUpdate::EndTask, error: {}",
+                                    err,
+                                )
+                            }
+                        }
+                    },
+
+                    Err(err) => {
+                        error!(
+                            "unable to parse data sent over the node queue, error: {}, data: {:?}",
+                            err, potential_update
+                        );
+                        if let Err(err) = potential_update.nack(BasicNackOptions::default()).await {
+                            error!("unable to negative-acknowledge malformed data sent over the node queue, error: {}", err)
+                        }
+                    }
+                }
+            }
+
+            Err(err) => {
+                error!(
+                    "unable to consume messages from the node queue, error: {}",
+                    err
+                );
+            }
+        }
+    }
 }
 
 /// An asynchronous task that mirrors messages to a discord channel from its corresponding mirror
@@ -153,7 +259,7 @@ pub enum StoppedMirrorTasksUpdate {
 pub async fn mirroring(
     errored: mpsc::UnboundedSender<ErroredMirrorTask>,
     mut stop_channel: oneshot::Receiver<()>,
-    service_channel: ChannelId,
+    service_channel: Id<id_marker::ChannelMarker>,
     mirror_channel: String,
     node_id: &str,
     http_client: Arc<HttpClient>,
@@ -161,169 +267,165 @@ pub async fn mirroring(
     rabbitmq: LapinPool,
     prepared_statements: Arc<PreparedStatements>,
 ) {
-    if let Err(err) = {
-        let mirror_channel = mirror_channel.clone();
+    //TODO(superwhiskers): replace this with a try block
+    if let Err(err) = try {
+        debug!(
+            "mirroring task spawned, service channel: {}, mirror channel: {}",
+            service_channel, &mirror_channel
+        );
 
-        async move || -> Result<(), MirrorTaskError> {
-            let mirror_channel = mirror_channel;
+        //TODO(superwhiskers): look into fine-tuning the parameters for exponential backoff here.
+        //                     there's a chance the defaults aren't "good enough"
+        let rabbitmq_channel = retry_notify(
+            ExponentialBackoff::<SystemClock>::default(),
+            || {
+                rabbitmq.get().map_err(|err| match err {
+                    err @ LapinPoolError::Timeout(_) => BackoffError::Transient {
+                        err,
+                        retry_after: Some(Duration::from_secs(0)),
+                    },
 
-            debug!(
-                "mirroring task spawned, service channel: {}, mirror channel: {}",
-                service_channel, &mirror_channel
-            );
+                    //TODO(superwhiskers): are there any other transient errors?
+                    err => BackoffError::Permanent(err),
+                })
+            },
+            |err, _| error!("unable to get a rabbitmq connection, error: {}", err),
+        )
+        .await?
+        .create_channel()
+        .await?;
 
-            //TODO(superwhiskers): look into fine-tuning the parameters for exponential backoff here.
-            //                     there's a chance the defaults aren't "good enough"
-            let rabbitmq_channel = retry_notify(
-                ExponentialBackoff::<SystemClock>::default(),
-                || {
-                    rabbitmq.get().map_err(|err| match err {
-                        err @ LapinPoolError::Timeout(_) => BackoffError::Transient {
-                            err,
-                            retry_after: Some(Duration::from_secs(0)),
-                        },
-
-                        //TODO(superwhiskers): are there any other transient errors?
-                        err => BackoffError::Permanent(err),
-                    })
-                },
-                |err, _| error!("unable to get a rabbitmq connection, error: {}", err),
+        rabbitmq_channel
+            .exchange_declare(
+                "nodes",
+                ExchangeKind::Direct,
+                ExchangeDeclareOptions::default(),
+                FieldTable::default(),
             )
-            .await?
-            .create_channel()
             .await?;
 
-            rabbitmq_channel
-                .exchange_declare(
-                    "nodes",
-                    ExchangeKind::Direct,
-                    ExchangeDeclareOptions::default(),
-                    FieldTable::default(),
-                )
-                .await?;
+        trace!("publishing to the nodes topic exchange");
 
-            trace!("publishing to the nodes topic exchange");
+        rabbitmq_channel
+            .basic_publish(
+                "nodes",
+                "discord",
+                BasicPublishOptions::default(),
+                &rmp_serde::to_vec(&NodeQueueUpdate::EndTask {
+                    to: Identifier::Discord(service_channel.cast()),
+                    from: Identifier::MirrorChannel(Cow::Borrowed(&mirror_channel)),
+                    node_id: node_id.into(),
+                })?,
+                BasicProperties::default(),
+            )
+            .await?;
 
-            rabbitmq_channel
-                .basic_publish(
-                    "nodes",
+        trace!("querying the database");
+
+        let mirror_channel_info = scylla
+            .execute(
+                prepared_statements
+                    .get(PreparedStatementKey::GetMirrorChannel)
+                    .ok_or(MirrorTaskError::NoPreparedStatement(
+                        PreparedStatementKey::GetMirrorChannel,
+                    ))?,
+                (
                     "discord",
-                    BasicPublishOptions::default(),
-                    rmp_serde::to_vec(&NodeQueueUpdate::EndTask {
-                        to: Identifier::Discord(GenericId(service_channel.0)),
-                        from: Identifier::MirrorChannel(Cow::Borrowed(&mirror_channel)),
-                        node_id: node_id.into(),
-                    })?,
-                    BasicProperties::default(),
-                )
-                .await?;
+                    mirror_channel.as_str(),
+                    service_channel.to_string(),
+                ),
+            )
+            .await?
+            .rows
+            .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
+            .pop() //NOTE: there should only ever be one
+            .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
+            .into_typed::<IncompleteMirrorChannelTableRow>()?;
 
-            trace!("querying the database");
+        trace!("creating the consumer");
 
-            let mirror_channel_info = scylla
-                .execute(
-                    prepared_statements
-                        .get(PreparedStatementKey::GetMirrorChannel)
-                        .ok_or(MirrorTaskError::NoPreparedStatement(
-                            PreparedStatementKey::GetMirrorChannel,
-                        ))?,
-                    (
-                        "discord",
-                        mirror_channel.as_str(),
-                        service_channel.0.to_string(),
-                    ),
-                )
-                .await?
-                .rows
-                .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
-                .pop() //NOTE: there should only ever be one
-                .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
-                .into_typed::<IncompleteMirrorChannelTableRow>()?;
+        //TODO(superwhiskers): figure out if this is the best possible prefetch count or if we need to tweak it
+        rabbitmq_channel
+            .basic_qos(5, BasicQosOptions::default())
+            .await?;
 
-            trace!("creating the consumer");
+        let mut consume_options = FieldTable::default();
+        consume_options.insert(
+            "x-stream-offset".into(),
+            mirror_channel_info.stream_offset.into(),
+        );
 
-            //TODO(superwhiskers): figure out if this is the best possible prefetch count or if we need to tweak it
-            rabbitmq_channel
-                .basic_qos(5, BasicQosOptions::default())
-                .await?;
+        let mut consumer = rabbitmq_channel
+            .basic_consume(
+                ("messages.".to_owned() + mirror_channel.as_str()).as_str(),
+                node_id,
+                BasicConsumeOptions::default(),
+                consume_options,
+            )
+            .await?;
 
-            let mut consume_options = FieldTable::default();
-            consume_options.insert(
-                "x-stream-offset".into(),
-                mirror_channel_info.stream_offset.into(),
-            );
+        trace!(
+            "beginning main mirroring task loop from {} to {}",
+            mirror_channel,
+            service_channel
+        );
 
-            let mut consumer = rabbitmq_channel
-                .basic_consume(
-                    ("messages.".to_owned() + mirror_channel.as_str()).as_str(),
-                    node_id,
-                    BasicConsumeOptions::default(),
-                    consume_options,
-                )
-                .await?;
+        // really, if the channel is closed or we have a message, it is almost certainly
+        // being instructed to stop
+        while time::timeout(Duration::from_millis(10), &mut stop_channel)
+            .await
+            .is_err()
+        {
+            // i do not believe any error that can arise from this will ever be
+            // transient, and i also don't want to deal with the borrow checker more
+            // than i have to. if any error does turn out to be transient, then i will
+            // promptly sort out the borrow checker stuff, but since i do not feel a
+            // need to right now, it has not been done
+            //
+            // this also applies to the code consuming from a queue in main.rs
+            while let Some(potential_update) = consumer.try_next().await? {
+                let update = rmp_serde::from_read::<_, MirrorChannelStreamUpdate>(
+                    potential_update.data.as_slice(),
+                )?;
+                trace!(
+                    "received mirror channel stream update event, data: {:?}",
+                    update
+                );
 
-            trace!(
-                "beginning main mirroring task loop from {} to {}",
-                mirror_channel,
-                service_channel
-            );
+                match update {
+                    //MirrorChannelStreamUpdate::MirrorChannelConfiguration(_) => (),
+                    //MirrorChannelStreamUpdate::ServiceChannelConfiguration(_) => (),
+                    MirrorChannelStreamUpdate::Message { author, content } => {
+                        trace!(
+                            "got message update, author: {}, content: `{}`",
+                            author,
+                            content
+                        );
 
-            // really, if the channel is closed or we have a message, it is almost certainly
-            // being instructed to stop
-            while time::timeout(Duration::from_millis(10), &mut stop_channel)
-                .await
-                .is_err()
-            {
-                // i do not believe any error that can arise from this will ever be
-                // transient, and i also don't want to deal with the borrow checker more
-                // than i have to. if any error does turn out to be transient, then i will
-                // promptly sort out the borrow checker stuff, but since i do not feel a
-                // need to right now, it has not been done
-                //
-                // this also applies to the code consuming from a queue in main.rs
-                while let Some((rabbitmq_channel, potential_update)) = consumer.try_next().await? {
-                    let update = rmp_serde::from_read::<_, MirrorChannelStreamUpdate>(
-                        potential_update.data.as_slice(),
-                    )?;
-                    trace!(
-                        "received mirror channel stream update event, data: {:?}",
-                        update
-                    );
-
-                    match update {
-                        //MirrorChannelStreamUpdate::MirrorChannelConfiguration(_) => (),
-                        //MirrorChannelStreamUpdate::ServiceChannelConfiguration(_) => (),
-                        MirrorChannelStreamUpdate::Message { author, content } => {
-                            trace!(
-                                "got message update, author: {}, content: `{}`",
-                                author,
-                                content
+                        if scylla
+                            .execute(
+                                prepared_statements
+                                    .get(PreparedStatementKey::IsUserBanned)
+                                    .ok_or(MirrorTaskError::NoPreparedStatement(
+                                        PreparedStatementKey::IsUserBanned,
+                                    ))?,
+                                (&mirror_channel, author.to_string()),
+                            )
+                            .await?
+                            .rows
+                            .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
+                            .pop()
+                            .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
+                            .into_typed::<(i64,)>()?
+                            .0
+                            == 0
+                        {
+                            debug!(
+                                "sending message, author: {}, content: `{}`",
+                                author, content
                             );
 
-                            if scylla
-                                .execute(
-                                    prepared_statements
-                                        .get(PreparedStatementKey::IsUserBanned)
-                                        .ok_or(MirrorTaskError::NoPreparedStatement(
-                                            PreparedStatementKey::IsUserBanned,
-                                        ))?,
-                                    (&mirror_channel, author.to_string()),
-                                )
-                                .await?
-                                .rows
-                                .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
-                                .pop()
-                                .ok_or(MirrorTaskError::NothingReturnedWhenQueryingUserBans)?
-                                .into_typed::<(i64,)>()?
-                                .0
-                                == 0
-                            {
-                                debug!(
-                                    "sending message, author: {}, content: `{}`",
-                                    author, content
-                                );
-
-                                scylla
+                            scylla
                                     .execute(
                                         prepared_statements
                                             .get(PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService)
@@ -332,48 +434,33 @@ pub async fn mirroring(
                                             ))?,
                                             (match &author {
                                                 Identifier::Discord(id) => id.to_string(),
-                                                _ => return Err(MirrorTaskError::NonsensicalIdentifierKindInUsercache),
+                                                _ => Err(MirrorTaskError::NonsensicalIdentifierKindInUsercache)?,
                                             }, author.kind().as_str())
                                     ).await?
                                     .rows; //TODO(superwhiskers): find a way to handle this cleanly---probably through a branching path
 
-                                http_client
-                                    .create_message(service_channel)
-                                    .content(&content)? //TODO(superwhiskers): add the username from usercache to this (consider adding settings for modifying the author display)
-                                    .exec()
-                                    .await?;
+                            http_client
+                                .create_message(service_channel)
+                                .content(&content)? //TODO(superwhiskers): add the username from usercache to this (consider adding settings for modifying the author display)
+                                .exec()
+                                .await?;
 
-                                rabbitmq_channel
-                                    .basic_ack(
-                                        potential_update.delivery_tag,
-                                        BasicAckOptions::default(),
-                                    )
-                                    .await?;
-                            } else {
-                                debug!(
-                                    "author is banned in this context, author: {}, context: {}",
-                                    author, mirror_channel
-                                );
+                            potential_update.ack(BasicAckOptions::default()).await?;
+                        } else {
+                            debug!(
+                                "author is banned in this context, author: {}, context: {}",
+                                author, mirror_channel
+                            );
 
-                                rabbitmq_channel
-                                    .basic_ack(
-                                        potential_update.delivery_tag,
-                                        BasicAckOptions::default(),
-                                    )
-                                    .await?;
-                            }
-
-                            //TODO(superwhiskers): if we've made it this far, we should be able to safely update the offset somehow
+                            potential_update.ack(BasicAckOptions::default()).await?;
                         }
+
+                        //TODO(superwhiskers): if we've made it this far, we should be able to safely update the offset somehow
                     }
                 }
             }
-
-            Ok(())
         }
-    }()
-    .await
-    {
+    } {
         debug!(
             "a mirroring task has errored, service channel: {}, mirrorchannel: {}, error: {:?}",
             service_channel, &mirror_channel, err
@@ -447,7 +534,7 @@ pub async fn mirror_manager(
     prepared_statements: Arc<PreparedStatements>,
 ) {
     fn handle_remove_task(
-        service_channel: ChannelId,
+        service_channel: Id<id_marker::ChannelMarker>,
         mirror_channel: String,
         handle: JoinHandle<()>,
         stop_sender: oneshot::Sender<()>,

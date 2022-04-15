@@ -38,14 +38,13 @@ use twilight_gateway::{
     cluster::{scheme::ShardScheme, Cluster, Events},
     Intents,
 };
-use twilight_http::Client;
+use twilight_http::client::{Client, InteractionClient};
 use twilight_model::{
     application::command::Command,
     gateway::{
         payload::outgoing::update_presence::UpdatePresencePayload,
         presence::{ActivityType, MinimalActivity, Status},
     },
-    id::{ChannelId, CommandVersionId, GuildId},
     oauth::current_application_info::CurrentApplicationInfo,
 };
 
@@ -136,23 +135,24 @@ pub async fn discord_http(config: &Configuration) -> Result<(Arc<Client>, Curren
 
     debug!("retrieved application information: {:?}", application_info);
 
-    trace!("setting the application id");
-
-    client.set_application_id(application_info.id);
-
     trace!("finished creating the discord http client");
 
     Ok((Arc::new(client), application_info))
 }
 
 /// Registers the bot's slash commands with discord
-pub async fn discord_commands(client: Arc<Client>) -> Result<()> {
+pub async fn discord_commands(
+    client: &InteractionClient<'_>,
+    application_info: &CurrentApplicationInfo,
+) -> Result<()> {
     trace!("registering the bot's commands with discord");
 
     warn!("TODO: remove the hardcoded guild id! this should only be used during development");
 
     //TODO: remove the hardcoded guild id and make these global
-    let guild_id = GuildId(855614556990210068_u64.try_into()?);
+    let guild_id = 855614556990210068_u64
+        .try_into()
+        .expect("this should be impossible");
 
     client
         .set_guild_commands(
@@ -160,7 +160,7 @@ pub async fn discord_commands(client: Arc<Client>) -> Result<()> {
             &COMMANDS
                 .iter()
                 .map(|c| Command {
-                    application_id: client.application_id(),
+                    application_id: Some(application_info.id),
                     guild_id: Some(guild_id),
                     name: c.name.to_string(),
                     default_permission: Some(c.default_permission),
@@ -168,11 +168,10 @@ pub async fn discord_commands(client: Arc<Client>) -> Result<()> {
                     id: None,
                     kind: c.kind,
                     options: c.options.to_vec(),
-                    version: CommandVersionId::new(1).expect("this should be impossible"),
+                    version: 1_u64.try_into().expect("this should be impossible"),
                 })
                 .collect::<Vec<Command>>(),
         )
-        .context("failed to create a request to set the global discord bot commands")?
         .exec()
         .await
         .context("failed to set the global discord bot commands")?;
@@ -186,7 +185,7 @@ pub async fn discord_commands(client: Arc<Client>) -> Result<()> {
 pub async fn discord_gateway(config: &Configuration) -> Result<(Arc<Cluster>, Events)> {
     trace!("initializing the gateway clients");
 
-    let (cluster, events) = Cluster::builder(&config.general.token, Intents::GUILD_MESSAGES)
+    let (cluster, events) = Cluster::builder(config.general.token.clone(), Intents::GUILD_MESSAGES)
         .presence(UpdatePresencePayload::new(
             vec![MinimalActivity {
                 kind: ActivityType::Custom,
@@ -257,7 +256,7 @@ pub async fn mirroring_tasks(
 
     //TODO(superwhiskers): strip this code as it's only used to verify that this works
     mirror_manager_channel.send(MirrorTaskSubscriptionUpdate::Add(
-        ChannelId(855615515199537162_u64.try_into()?),
+        855615515199537162_u64.try_into()?,
         "messages-test".to_string(),
     ))?;
 

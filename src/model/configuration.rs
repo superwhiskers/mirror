@@ -16,7 +16,7 @@
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 
-use config::{Config, ConfigError, Environment, File};
+use config::{Config, ConfigBuilder, ConfigError, Environment, File};
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -37,49 +37,18 @@ pub struct Configuration {
 
 impl Configuration {
     pub fn new() -> Result<Self, ConfigError> {
-        let mut config = Config::default();
-
-        config.merge(File::with_name("config.toml").required(false))?;
-
-        // these following blocks are necessary as the config crate does not handle sequences
-        // provided through the environment
-
-        // this specifically is necessary because the configuration file *may* have set a
-        // proper sequence already, and the environment may have not overriden it, causing the
-        // `get_str` methods to fail
-        let mut environment_config = Config::default();
-
-        environment_config.merge(Environment::with_prefix("mirror").separator("_"))?;
-
-        match environment_config.get_str("rabbitmq.addresses") {
-            Ok(addresses) => {
-                config.set(
-                    "rabbitmq.addresses",
-                    addresses.split(',').collect::<Vec<&str>>(),
-                )?;
-            }
-
-            // it may not have been specified in the config file or through the environment,
-            // so we ignore this error
-            Err(ConfigError::NotFound(_)) => (),
-            Err(err) => return Err(err),
-        }
-        match environment_config.get_str("scylla.addresses") {
-            Ok(addresses) => {
-                config.set(
-                    "scylla.addresses",
-                    addresses.split(',').collect::<Vec<&str>>(),
-                )?;
-            }
-
-            // ditto
-            Err(ConfigError::NotFound(_)) => (),
-            Err(err) => return Err(err),
-        }
-
-        config.merge(environment_config)?;
-
-        config.try_into()
+        //TODO(superwhiskers): i'm not sure if this actually works as i expect it to
+        Config::builder()
+            .add_source(File::with_name("config.toml").required(false))
+            .add_source(
+                Environment::with_prefix("mirror")
+                    .separator("_")
+                    .list_separator(",")
+                    .with_list_parse_key("rabbitmq.addresses")
+                    .with_list_parse_key("scylla.addresses"),
+            )
+            .build()
+            .and_then(|c| c.try_deserialize())
     }
 }
 
