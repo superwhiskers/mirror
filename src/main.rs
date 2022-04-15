@@ -112,20 +112,7 @@ async fn main() -> Result<()> {
         let mut rabbitmq_stream: [u8; 13 + SimpleUuidAdapter::LENGTH] =
             [0; 13 + SimpleUuidAdapter::LENGTH];
 
-        rabbitmq_stream[0] = b'n';
-        rabbitmq_stream[1] = b'o';
-        rabbitmq_stream[2] = b'd';
-        rabbitmq_stream[3] = b'e';
-        rabbitmq_stream[4] = b'.';
-        rabbitmq_stream[5] = b'd';
-        rabbitmq_stream[6] = b'i';
-        rabbitmq_stream[7] = b's';
-        rabbitmq_stream[8] = b'c';
-        rabbitmq_stream[9] = b'o';
-        rabbitmq_stream[10] = b'r';
-        rabbitmq_stream[11] = b'd';
-        rabbitmq_stream[12] = b'.';
-
+        rabbitmq_stream[..13].copy_from_slice(b"node.discord.");
         rabbitmq_stream[13..].copy_from_slice(NODE_ID_RAW.as_slice());
 
         rabbitmq_stream
@@ -243,8 +230,8 @@ async fn main() -> Result<()> {
     while let Some((_shard_id, event)) = events.next().await {
         match event {
             Event::Ready(event) => info!(
-                "logged in as {}#{}",
-                event.user.name, event.user.discriminator
+                "logged in as {}#{}, in {} guilds",
+                event.user.name, event.user.discriminator, event.guilds.len()
             ),
             Event::InteractionCreate(event) => {
                 if let Interaction::ApplicationCommand(interaction) = event.0 {

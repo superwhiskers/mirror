@@ -322,6 +322,7 @@ pub async fn mirroring(
 
         trace!("querying the database");
 
+        //TODO(superwhiskers): there appears to be a problem here related to the uuid field
         let mirror_channel_info = scylla
             .execute(
                 prepared_statements

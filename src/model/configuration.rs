@@ -47,8 +47,8 @@ impl Configuration {
                     .with_list_parse_key("rabbitmq.addresses")
                     .with_list_parse_key("scylla.addresses"),
             )
-            .build()
-            .and_then(|c| c.try_deserialize())
+            .build()?
+            .try_deserialize()
     }
 }
 

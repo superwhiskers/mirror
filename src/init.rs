@@ -74,7 +74,7 @@ pub async fn rabbitmq(config: &Configuration) -> Result<LapinPool> {
 
     let node = working_addresses
         .next()
-        .ok_or(anyhow!("no addresses were listed in the configuration"))?
+        .ok_or_else(|| anyhow!("no addresses were listed in the configuration"))?
         .to_string();
 
     debug!("chosen rabbitmq node: {:?}", node);
