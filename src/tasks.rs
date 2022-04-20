@@ -53,6 +53,7 @@ use twilight_gateway::cluster::Cluster;
 use twilight_http::{error::Error as TwilightHttpError, Client as HttpClient};
 use twilight_model::id::{marker as id_marker, Id};
 use twilight_validate::message::MessageValidationError as TwilightMessageValidationError;
+use uuid::Uuid;
 
 use crate::{
     model::{
@@ -65,7 +66,7 @@ use crate::{
 
 /// A signal to drop the mirroring task associated with the (discord channel, mirror channel) pair
 /// and handle the error, whatever it may be
-pub struct ErroredMirrorTask(Id<id_marker::ChannelMarker>, String, MirrorTaskError);
+pub struct ErroredMirrorTask(Id<id_marker::ChannelMarker>, Uuid, MirrorTaskError);
 
 /// An enumeration over possible return values from mirroring tasks
 #[derive(Error, Debug)]
@@ -124,11 +125,11 @@ pub enum MirrorTaskError {
 pub enum MirrorTaskSubscriptionUpdate {
     /// Add the specified discord channel to the subscription list for the
     /// specified mirror channel
-    Add(Id<id_marker::ChannelMarker>, String),
+    Add(Id<id_marker::ChannelMarker>, Uuid),
 
     /// Remove the specified discord channel from the subscription list for
     /// the specified mirror channel
-    Remove(Id<id_marker::ChannelMarker>, String),
+    Remove(Id<id_marker::ChannelMarker>, Uuid),
 
     /// Stop all asynchronous mirroring tasks and exit
     Stop,
@@ -140,7 +141,7 @@ pub enum MirrorTaskSubscriptionUpdate {
 pub enum StoppedMirrorTasksUpdate {
     /// Add the specified task information to the list of tasks that were asked to stop
     Add {
-        channel: (Id<id_marker::ChannelMarker>, String),
+        channel: (Id<id_marker::ChannelMarker>, Uuid),
         task: JoinHandle<()>,
     },
 
@@ -149,7 +150,7 @@ pub enum StoppedMirrorTasksUpdate {
 }
 
 pub async fn node_queue(
-    node_id: &str,
+    node_id: Uuid,
     mut consumer: Consumer,
     mirror_manager_channel: mpsc::UnboundedSender<MirrorTaskSubscriptionUpdate>,
 ) {
@@ -194,7 +195,7 @@ pub async fn node_queue(
                                         if let Err(err) = mirror_manager_channel
                                             .send(MirrorTaskSubscriptionUpdate::Remove(
                                                 discord_identifier.cast(),
-                                                mirror_channel.to_string(),
+                                                mirror_channel,
                                             )) {
                                             error!(
                                                 "unable to send a request to end a mirroring task, to: {}, from: {}, origin: {}, error: {}",
@@ -260,18 +261,17 @@ pub async fn mirroring(
     errored: mpsc::UnboundedSender<ErroredMirrorTask>,
     mut stop_channel: oneshot::Receiver<()>,
     service_channel: Id<id_marker::ChannelMarker>,
-    mirror_channel: String,
-    node_id: &str,
+    mirror_channel: Uuid,
+    node_id: Uuid,
     http_client: Arc<HttpClient>,
     scylla: Arc<ScyllaSession>,
     rabbitmq: LapinPool,
     prepared_statements: Arc<PreparedStatements>,
 ) {
-    //TODO(superwhiskers): replace this with a try block
     if let Err(err) = try {
         debug!(
             "mirroring task spawned, service channel: {}, mirror channel: {}",
-            service_channel, &mirror_channel
+            service_channel, mirror_channel
         );
 
         //TODO(superwhiskers): look into fine-tuning the parameters for exponential backoff here.
@@ -313,8 +313,8 @@ pub async fn mirroring(
                 BasicPublishOptions::default(),
                 &rmp_serde::to_vec(&NodeQueueUpdate::EndTask {
                     to: Identifier::Discord(service_channel.cast()),
-                    from: Identifier::MirrorChannel(Cow::Borrowed(&mirror_channel)),
-                    node_id: node_id.into(),
+                    from: Identifier::MirrorChannel(mirror_channel),
+                    node_id,
                 })?,
                 BasicProperties::default(),
             )
@@ -323,6 +323,8 @@ pub async fn mirroring(
         trace!("querying the database");
 
         //TODO(superwhiskers): there appears to be a problem here related to the uuid field
+        // -- this appears to be because we haven't updated the mirror channels to use
+        //    "friendly names"
         let mirror_channel_info = scylla
             .execute(
                 prepared_statements
@@ -330,11 +332,7 @@ pub async fn mirroring(
                     .ok_or(MirrorTaskError::NoPreparedStatement(
                         PreparedStatementKey::GetMirrorChannel,
                     ))?,
-                (
-                    "discord",
-                    mirror_channel.as_str(),
-                    service_channel.to_string(),
-                ),
+                ("discord", mirror_channel, service_channel.to_string()),
             )
             .await?
             .rows
@@ -358,8 +356,8 @@ pub async fn mirroring(
 
         let mut consumer = rabbitmq_channel
             .basic_consume(
-                ("messages.".to_owned() + mirror_channel.as_str()).as_str(),
-                node_id,
+                ("messages.".to_owned() + mirror_channel.to_string().as_str()).as_str(),
+                node_id.to_string().as_str(),
                 BasicConsumeOptions::default(),
                 consume_options,
             )
@@ -464,7 +462,7 @@ pub async fn mirroring(
     } {
         debug!(
             "a mirroring task has errored, service channel: {}, mirrorchannel: {}, error: {:?}",
-            service_channel, &mirror_channel, err
+            service_channel, mirror_channel, err
         );
 
         if errored
@@ -475,13 +473,13 @@ pub async fn mirroring(
             ))
             .is_err()
         {
-            panic!("unable to send to the errored mirror task channel, service channel: {}, mirror channel: {}", service_channel, &mirror_channel);
+            panic!("unable to send to the errored mirror task channel, service channel: {}, mirror channel: {}", service_channel, mirror_channel);
         }
     }
 
     debug!(
         "mirroring task stopped, service channel: {}, mirror channel: {}",
-        service_channel, &mirror_channel
+        service_channel, mirror_channel
     );
 }
 
@@ -527,7 +525,7 @@ pub async fn stopped_mirror_manager(
 /// An asynchronous task for managing tasks that mirror messages across service channels
 pub async fn mirror_manager(
     mut task_management: mpsc::UnboundedReceiver<MirrorTaskSubscriptionUpdate>,
-    node_id: &'static str,
+    node_id: Uuid,
     rabbitmq: LapinPool,
     scylla: Arc<ScyllaSession>,
     http_client: Arc<HttpClient>,
@@ -536,7 +534,7 @@ pub async fn mirror_manager(
 ) {
     fn handle_remove_task(
         service_channel: Id<id_marker::ChannelMarker>,
-        mirror_channel: String,
+        mirror_channel: Uuid,
         handle: JoinHandle<()>,
         stop_sender: oneshot::Sender<()>,
         stopped_tasks: &mpsc::UnboundedSender<StoppedMirrorTasksUpdate>,

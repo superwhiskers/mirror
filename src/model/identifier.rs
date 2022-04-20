@@ -29,6 +29,7 @@ use std::{
 };
 use thiserror::Error;
 use twilight_model::id::{marker::GenericMarker, Id};
+use uuid::{Error as UuidError, Uuid};
 
 /// The service associated with an [`Identifier`]
 #[non_exhaustive]
@@ -56,15 +57,15 @@ impl Display for IdentifierKind {
 /// An identifier stored in mirror's database
 #[non_exhaustive]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum Identifier<'a> {
+pub enum Identifier {
     /// An identifier used on the Discord platform
     Discord(Id<GenericMarker>),
 
     /// An identifier for a mirror channel
-    MirrorChannel(Cow<'a, str>),
+    MirrorChannel(Uuid),
 }
 
-impl<'a> Identifier<'a> {
+impl Identifier {
     pub fn kind(&self) -> IdentifierKind {
         match &self {
             Self::Discord(_) => IdentifierKind::Discord,
@@ -73,20 +74,20 @@ impl<'a> Identifier<'a> {
     }
 }
 
-impl<'a> FromCqlVal<CqlValue> for Identifier<'a> {
+impl FromCqlVal<CqlValue> for Identifier {
     fn from_cql(value: CqlValue) -> Result<Self, FromCqlValError> {
         Self::from_str(value.as_text().ok_or(FromCqlValError::BadCqlType)?)
             .map_err(|_| FromCqlValError::BadCqlType)
     }
 }
 
-impl<'a> FromStr for Identifier<'a> {
+impl FromStr for Identifier {
     type Err = ParseIdentifierError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.split_once('-') {
             Some(("discord", id)) => Self::Discord(id.parse()?),
-            Some(("messages", id)) => Self::MirrorChannel(Cow::Owned(id.to_string())),
+            Some(("messages", id)) => Self::MirrorChannel(id.parse()?),
             Some((service, _)) => {
                 // i personally don't like the allocation here--i think it should be removed at
                 // some point or another, but there is no way to add lifetime parameters to the
@@ -98,7 +99,7 @@ impl<'a> FromStr for Identifier<'a> {
     }
 }
 
-impl<'a> Display for Identifier<'a> {
+impl Display for Identifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Self::Discord(id) => write!(formatter, "discord-{}", id),
@@ -114,6 +115,10 @@ pub enum ParseIdentifierError {
     /// An error encountered when an integer could not be parsed
     #[error("An error was encountered while trying to parse a string as an integer")]
     IntegerParseError(#[from] ParseIntError),
+
+    /// An error encountered when trying to work with a UUID
+    #[error("An error was encountered while trying to work with a UUID")]
+    UuidError(#[from] UuidError),
 
     /// An error encountered when the service portion of the identifier (the part of the string
     /// before the first dash) is not a known service

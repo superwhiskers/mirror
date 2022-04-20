@@ -45,8 +45,9 @@ use twilight_model::{
         payload::outgoing::update_presence::UpdatePresencePayload,
         presence::{ActivityType, MinimalActivity, Status},
     },
-    oauth::current_application_info::CurrentApplicationInfo,
+    oauth::Application,
 };
+use uuid::Uuid;
 
 use crate::{
     commands::COMMANDS,
@@ -117,7 +118,7 @@ pub async fn scylla(
 }
 
 /// Initializes the discord http client with the application id
-pub async fn discord_http(config: &Configuration) -> Result<(Arc<Client>, CurrentApplicationInfo)> {
+pub async fn discord_http(config: &Configuration) -> Result<(Arc<Client>, Application)> {
     trace!("creating the discord http client");
 
     let client = Client::new(config.general.token.clone());
@@ -143,7 +144,7 @@ pub async fn discord_http(config: &Configuration) -> Result<(Arc<Client>, Curren
 /// Registers the bot's slash commands with discord
 pub async fn discord_commands(
     client: &InteractionClient<'_>,
-    application_info: &CurrentApplicationInfo,
+    application_info: &Application,
 ) -> Result<()> {
     trace!("registering the bot's commands with discord");
 
@@ -213,7 +214,7 @@ pub async fn discord_gateway(config: &Configuration) -> Result<(Arc<Cluster>, Ev
 
 /// Complete bot database initialization actions
 pub async fn mirroring_tasks(
-    node_id: &'static str,
+    node_id: Uuid,
     rabbitmq: LapinPool,
     scylla: Arc<ScyllaSession>,
     http_client: Arc<Client>,
@@ -257,7 +258,7 @@ pub async fn mirroring_tasks(
     //TODO(superwhiskers): strip this code as it's only used to verify that this works
     mirror_manager_channel.send(MirrorTaskSubscriptionUpdate::Add(
         855615515199537162_u64.try_into()?,
-        "messages-test".to_string(),
+        "3c08f3c512774332a40610aa4d6186c2".parse()?, //TODO(superwhiskers): change these
     ))?;
 
     /*

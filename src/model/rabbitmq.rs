@@ -18,19 +18,20 @@
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use uuid::Uuid;
 
 use crate::model::identifier::Identifier;
 
 /// An enumeration over the events sent over a node's amqp queue
 #[non_exhaustive]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum NodeQueueUpdate<'a> {
+pub enum NodeQueueUpdate {
     /// An event that signals to the node the queue belongs to that it should end the task
     /// corresponding to the information in the structure
     EndTask {
-        to: Identifier<'a>,
-        from: Identifier<'a>,
-        node_id: Cow<'a, str>,
+        to: Identifier,
+        from: Identifier,
+        node_id: Uuid,
     },
 }
 
@@ -60,7 +61,7 @@ pub enum ServiceChannelConfigurationItem {
 //TODO(superwhiskers): add in other features and add these back as necessary
 #[non_exhaustive]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum MirrorChannelStreamUpdate<'a> {
+pub enum MirrorChannelStreamUpdate {
     /// An event that signals there has been an update to the mirror channel's configuration
     //MirrorChannelConfiguration(MirrorChannelConfigurationItem),
 
@@ -69,7 +70,7 @@ pub enum MirrorChannelStreamUpdate<'a> {
 
     /// An event indicating a message has been sent
     Message {
-        author: Identifier<'a>,
+        author: Identifier,
         content: String,
     },
 }

@@ -79,16 +79,10 @@ use crate::{
     tasks::MirrorTaskSubscriptionUpdate,
 };
 
-static NODE_ID_RAW: Lazy<[u8; SimpleUuidAdapter::LENGTH]> = Lazy::new(|| {
-    let mut id = [0; SimpleUuidAdapter::LENGTH];
-
+static NODE_ID: Lazy<Uuid> = Lazy::new(|| {
     trace!("generating the node's uuid");
 
-    let uuid = Uuid::new_v4().to_simple();
-
-    uuid.encode_lower(&mut id);
-
-    id
+    Uuid::new_v4()
 });
 
 #[global_allocator]
@@ -113,14 +107,15 @@ async fn main() -> Result<()> {
             [0; 13 + SimpleUuidAdapter::LENGTH];
 
         rabbitmq_stream[..13].copy_from_slice(b"node.discord.");
-        rabbitmq_stream[13..].copy_from_slice(NODE_ID_RAW.as_slice());
+        NODE_ID
+            .to_simple_ref()
+            .encode_lower(&mut rabbitmq_stream[13..]);
 
         rabbitmq_stream
     };
-    let node_id = str::from_utf8(NODE_ID_RAW.as_slice())?;
     let node_id_rabbitmq_queue = str::from_utf8(&node_id_rabbitmq_queue_raw)?;
 
-    info!("consumer id: {}", node_id);
+    info!("consumer id: {}", *NODE_ID);
     debug!("rabbitmq channel: {}", node_id_rabbitmq_queue);
 
     let rabbitmq = init::rabbitmq(&config).await?;
@@ -133,10 +128,12 @@ async fn main() -> Result<()> {
         .await?
         .basic_publish(
             "",
-            "messages.messages-test",
+            "messages.messages-3c08f3c512774332a40610aa4d6186c2", //TODO(superwhiskers): change these
             lapin::options::BasicPublishOptions::default(),
             &rmp_serde::to_vec(&model::rabbitmq::MirrorChannelStreamUpdate::Message {
-                author: model::identifier::Identifier::MirrorChannel("test".into()),
+                author: model::identifier::Identifier::MirrorChannel(
+                    "3c08f3c512774332a40610aa4d6186c2".parse()?,
+                ),
                 content: "whatever".into(),
             })?,
             lapin::BasicProperties::default(),
@@ -154,7 +151,7 @@ async fn main() -> Result<()> {
     let (mut cluster, mut events) = init::discord_gateway(&config).await?;
 
     let (_mirror_manager_handle, mirror_manager_channel) = init::mirroring_tasks(
-        node_id,
+        *NODE_ID,
         rabbitmq.clone(),
         Arc::clone(&scylla),
         Arc::clone(&http_client),
@@ -201,7 +198,7 @@ async fn main() -> Result<()> {
     //TODO(superwhiskers): consume from the queue and cancel consuming once we are done with
     //                     it
     let _node_queue_handle = tokio::spawn(tasks::node_queue(
-        node_id,
+        *NODE_ID,
         rabbitmq_channel
             .basic_consume(
                 node_id_rabbitmq_queue,
@@ -231,7 +228,9 @@ async fn main() -> Result<()> {
         match event {
             Event::Ready(event) => info!(
                 "logged in as {}#{}, in {} guilds",
-                event.user.name, event.user.discriminator, event.guilds.len()
+                event.user.name,
+                event.user.discriminator,
+                event.guilds.len()
             ),
             Event::InteractionCreate(event) => {
                 if let Interaction::ApplicationCommand(interaction) = event.0 {
