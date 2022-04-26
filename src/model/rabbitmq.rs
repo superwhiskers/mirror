@@ -69,8 +69,5 @@ pub enum MirrorChannelStreamUpdate {
     //ServiceChannelConfiguration(ServiceChannelConfigurationItem),
 
     /// An event indicating a message has been sent
-    Message {
-        author: Identifier,
-        content: String,
-    },
+    Message { author: Identifier, content: String },
 }

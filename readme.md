@@ -2,8 +2,8 @@
 
 # mirror
 
-the distributed mirroring service you never wanted (but i delivered to
-you anyway)
+efficient, scalable distributed state synchronization---the discord
+bot
 
 ## what
 

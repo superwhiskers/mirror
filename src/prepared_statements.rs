@@ -26,7 +26,7 @@ pub static PREPARED_STATEMENTS: Lazy<Map<PreparedStatementKey, &str>> = Lazy::ne
     let mut map = Map::new();
 
     map.insert(
-        PreparedStatementKey::GetMirrorChannel,
+        PreparedStatementKey::GetMirrorChannelLink,
         "SELECT stream_offset FROM linked_mirror_channels WHERE service = ? AND mirror_channel = ? AND service_channel = ?",
     );
     map.insert(
@@ -47,7 +47,15 @@ pub static PREPARED_STATEMENTS: Lazy<Map<PreparedStatementKey, &str>> = Lazy::ne
     );
     map.insert(
         PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService,
-        "SELECT username FROM usercache WHERE user = ? AND service = ?",
+        "SELECT username, avatar FROM usercache WHERE user = ? AND service = ?",
+    );
+    map.insert(
+        PreparedStatementKey::InsertMirrorChannelLink,
+        "INSERT INTO linked_mirror_channels (service, mirror_channel, service_channel, stream_offset) VALUES (?, ?, ?, ?)",
+    );
+    map.insert(
+        PreparedStatementKey::UpdateMirrorChannelLinkOffset,
+        "UPDATE linked_mirror_channels SET stream_offset = ? WHERE service = ? AND mirror_channel = ? AND service_channel = ?",
     );
 
     map
@@ -55,10 +63,12 @@ pub static PREPARED_STATEMENTS: Lazy<Map<PreparedStatementKey, &str>> = Lazy::ne
 
 #[derive(Key, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PreparedStatementKey {
-    GetMirrorChannel,
+    GetMirrorChannelLink,
     GetUserRoles,
     GetUserRolesInScope,
     IsUserBanned,
     IsUserBannedInScope,
     FetchUsernameFromUsercacheByUserAndService,
+    InsertMirrorChannelLink,
+    UpdateMirrorChannelLinkOffset,
 }

@@ -37,6 +37,7 @@ use uuid::{Error as UuidError, Uuid};
 pub enum IdentifierKind {
     Discord,
     MirrorChannel,
+    System,
 }
 
 impl IdentifierKind {
@@ -44,6 +45,7 @@ impl IdentifierKind {
         match &self {
             Self::Discord => "discord",
             Self::MirrorChannel => "messages",
+            Self::System => "system",
         }
     }
 }
@@ -63,6 +65,9 @@ pub enum Identifier {
 
     /// An identifier for a mirror channel
     MirrorChannel(Uuid),
+
+    /// An identifier for a system user
+    System(String),
 }
 
 impl Identifier {
@@ -70,6 +75,7 @@ impl Identifier {
         match &self {
             Self::Discord(_) => IdentifierKind::Discord,
             Self::MirrorChannel(_) => IdentifierKind::MirrorChannel,
+            Self::System(_) => IdentifierKind::System,
         }
     }
 }
@@ -88,6 +94,7 @@ impl FromStr for Identifier {
         Ok(match s.split_once('-') {
             Some(("discord", id)) => Self::Discord(id.parse()?),
             Some(("messages", id)) => Self::MirrorChannel(id.parse()?),
+            Some(("system", id)) => Self::System(id.to_string()),
             Some((service, _)) => {
                 // i personally don't like the allocation here--i think it should be removed at
                 // some point or another, but there is no way to add lifetime parameters to the
@@ -103,7 +110,8 @@ impl Display for Identifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Self::Discord(id) => write!(formatter, "discord-{}", id),
-            Self::MirrorChannel(name) => write!(formatter, "messages-{}", name),
+            Self::MirrorChannel(id) => write!(formatter, "messages-{}", id),
+            Self::System(id) => write!(formatter, "system-{}", id),
         }
     }
 }

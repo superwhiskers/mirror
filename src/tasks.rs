@@ -59,7 +59,7 @@ use crate::{
     model::{
         identifier::Identifier,
         rabbitmq::{MirrorChannelStreamUpdate, NodeQueueUpdate},
-        scylla::IncompleteMirrorChannelTableRow,
+        scylla::{IncompleteMirrorChannelTableRow, IncompleteUsercacheTableRow},
     },
     prepared_statements::{PreparedStatementKey, PreparedStatements},
 };
@@ -269,6 +269,8 @@ pub async fn mirroring(
     prepared_statements: Arc<PreparedStatements>,
 ) {
     if let Err(err) = try {
+        let service_channel_stringified = service_channel.to_string();
+
         debug!(
             "mirroring task spawned, service channel: {}, mirror channel: {}",
             service_channel, mirror_channel
@@ -306,6 +308,7 @@ pub async fn mirroring(
 
         trace!("publishing to the nodes topic exchange");
 
+        //TODO(superwhiskers): remove this
         rabbitmq_channel
             .basic_publish(
                 "nodes",
@@ -322,41 +325,57 @@ pub async fn mirroring(
 
         trace!("querying the database");
 
-        //TODO(superwhiskers): there appears to be a problem here related to the uuid field
-        // -- this appears to be because we haven't updated the mirror channels to use
-        //    "friendly names"
-        let mirror_channel_info = scylla
+        let IncompleteMirrorChannelTableRow { mut stream_offset } = if let Some(row) = scylla
             .execute(
                 prepared_statements
-                    .get(PreparedStatementKey::GetMirrorChannel)
+                    .get(PreparedStatementKey::GetMirrorChannelLink)
                     .ok_or(MirrorTaskError::NoPreparedStatement(
-                        PreparedStatementKey::GetMirrorChannel,
+                        PreparedStatementKey::GetMirrorChannelLink,
                     ))?,
-                ("discord", mirror_channel, service_channel.to_string()),
+                ("discord", mirror_channel, &service_channel_stringified),
             )
             .await?
             .rows
             .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
-            .pop() //NOTE: there should only ever be one
-            .ok_or(MirrorTaskError::NoMirrorChannelTableServiceChannelRow)?
-            .into_typed::<IncompleteMirrorChannelTableRow>()?;
+            .pop()
+        //NOTE: there should only ever be one
+        {
+            row.into_typed::<IncompleteMirrorChannelTableRow>()?
+        } else {
+            //NOTE: this does assume that we're the only task dealing with it but i guess
+            //      that's a reasonable assumption to have?
+            scylla
+                .execute(
+                    prepared_statements
+                        .get(PreparedStatementKey::InsertMirrorChannelLink)
+                        .ok_or(MirrorTaskError::NoPreparedStatement(
+                            PreparedStatementKey::InsertMirrorChannelLink,
+                        ))?,
+                    (
+                        "discord",
+                        mirror_channel,
+                        &service_channel_stringified,
+                        0_i16,
+                    ),
+                )
+                .await?;
+            IncompleteMirrorChannelTableRow { stream_offset: 0 }
+        };
 
         trace!("creating the consumer");
 
-        //TODO(superwhiskers): figure out if this is the best possible prefetch count or if we need to tweak it
+        //TODO(superwhiskers): figure out why prefetch count requires the server to have
+        //                     `prefetch_count` messages to send
         rabbitmq_channel
-            .basic_qos(5, BasicQosOptions::default())
+            .basic_qos(1, BasicQosOptions::default())
             .await?;
 
         let mut consume_options = FieldTable::default();
-        consume_options.insert(
-            "x-stream-offset".into(),
-            mirror_channel_info.stream_offset.into(),
-        );
+        consume_options.insert("x-stream-offset".into(), stream_offset.into());
 
         let mut consumer = rabbitmq_channel
             .basic_consume(
-                ("messages.".to_owned() + mirror_channel.to_string().as_str()).as_str(),
+                ("messages.messages-".to_owned() + mirror_channel.to_string().as_str()).as_str(),
                 node_id.to_string().as_str(),
                 BasicConsumeOptions::default(),
                 consume_options,
@@ -424,37 +443,75 @@ pub async fn mirroring(
                                 author, content
                             );
 
-                            scylla
+                            let id = match &author {
+                                Identifier::Discord(id) => id.to_string(),
+                                Identifier::System(id) => id.to_string(),
+                                _ => {
+                                    //NOTE: this is for reliability. if i randomly add a new node for a service, i'd prefer to warn and drop the message instead of failing
+                                    //      we could instead send a message to the channel or something, but i'm not sure i want to potentially spam a channel like that
+                                    warn!(
+                                        "unsupported message origin service: {}",
+                                        author.kind().as_str()
+                                    );
+
+                                    continue;
+                                }
+                            };
+
+                            //TODO(superwhiskers): we should have some backoff for discord failures
+
+                            let content = format!("{}: {}", if let Some(usercache_row) = scylla
                                     .execute(
                                         prepared_statements
                                             .get(PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService)
                                             .ok_or(MirrorTaskError::NoPreparedStatement(
                                                 PreparedStatementKey::FetchUsernameFromUsercacheByUserAndService
                                             ))?,
-                                            (match &author {
-                                                Identifier::Discord(id) => id.to_string(),
-                                                _ => Err(MirrorTaskError::NonsensicalIdentifierKindInUsercache)?,
-                                            }, author.kind().as_str())
+                                            (id, author.kind().as_str())
                                     ).await?
-                                    .rows; //TODO(superwhiskers): find a way to handle this cleanly---probably through a branching path
+                                    .rows
+                                    .and_then(|mut r| r.pop()) {
+                                let IncompleteUsercacheTableRow { username, .. } = usercache_row.into_typed::<IncompleteUsercacheTableRow>()?;
+                                username
+                            } else {
+                                author.to_string()
+                            }, content);
 
                             http_client
                                 .create_message(service_channel)
-                                .content(&content)? //TODO(superwhiskers): add the username from usercache to this (consider adding settings for modifying the author display)
+                                .content(content.as_str())?
                                 .exec()
                                 .await?;
-
-                            potential_update.ack(BasicAckOptions::default()).await?;
                         } else {
                             debug!(
                                 "author is banned in this context, author: {}, context: {}",
                                 author, mirror_channel
                             );
-
-                            potential_update.ack(BasicAckOptions::default()).await?;
                         }
 
+                        // perhaps backoff everywhere, idk
+                        // maybe instead of immediately erroring or something we could
+                        // represent the task as a generator in which it yields an error and
+                        // can be restarted or something
+                        potential_update.ack(BasicAckOptions::default()).await?;
+
                         //TODO(superwhiskers): if we've made it this far, we should be able to safely update the offset somehow
+                        stream_offset += 1;
+                        scylla
+                            .execute(
+                                prepared_statements
+                                    .get(PreparedStatementKey::UpdateMirrorChannelLinkOffset)
+                                    .ok_or(MirrorTaskError::NoPreparedStatement(
+                                        PreparedStatementKey::UpdateMirrorChannelLinkOffset,
+                                    ))?,
+                                (
+                                    stream_offset as i16,
+                                    "discord",
+                                    mirror_channel,
+                                    &service_channel_stringified,
+                                ),
+                            )
+                            .await?;
                     }
                 }
             }

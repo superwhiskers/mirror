@@ -128,12 +128,10 @@ async fn main() -> Result<()> {
         .await?
         .basic_publish(
             "",
-            "messages.messages-3c08f3c512774332a40610aa4d6186c2", //TODO(superwhiskers): change these
+            "messages.messages-3c08f3c5-1277-4332-a406-10aa4d6186c2", //TODO(superwhiskers): change these
             lapin::options::BasicPublishOptions::default(),
             &rmp_serde::to_vec(&model::rabbitmq::MirrorChannelStreamUpdate::Message {
-                author: model::identifier::Identifier::MirrorChannel(
-                    "3c08f3c512774332a40610aa4d6186c2".parse()?,
-                ),
+                author: model::identifier::Identifier::System("testing user".to_string()),
                 content: "whatever".into(),
             })?,
             lapin::BasicProperties::default(),
@@ -237,7 +235,9 @@ async fn main() -> Result<()> {
                     match interaction.data.name.as_str() {
                         "about" => {
                             if let Err(err) =
-                                commands::about_handler(&interaction_client, interaction).await
+                                //TODO(superwhiskers): remove the await here and instead spawn a task to avoid blocking this task
+                                commands::about_handler(&interaction_client, interaction)
+                                        .await
                             {
                                 error!(
                                     "unable to complete execution of the about command: {}",

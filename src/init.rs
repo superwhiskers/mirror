@@ -81,6 +81,7 @@ pub async fn rabbitmq(config: &Configuration) -> Result<LapinPool> {
     debug!("chosen rabbitmq node: {:?}", node);
 
     //TODO(superwhiskers): find a way to pass along a client certificate as an identity
+    //                     -- this is now supported: https://docs.rs/lapin/latest/lapin/struct.Connection.html#method.connect_with_config
     Ok(
         LapinPool::builder(LapinPoolManager::new(node, ConnectionProperties::default()))
             .max_size(config.rabbitmq.max)
@@ -256,8 +257,11 @@ pub async fn mirroring_tasks(
     trace!("retrieving mirror channels");
 
     //TODO(superwhiskers): strip this code as it's only used to verify that this works
+
+    warn!("TODO: remove the hardcoded channel id");
+
     mirror_manager_channel.send(MirrorTaskSubscriptionUpdate::Add(
-        855615515199537162_u64.try_into()?,
+        938297846929711135_u64.try_into()?,
         "3c08f3c512774332a40610aa4d6186c2".parse()?, //TODO(superwhiskers): change these
     ))?;
 

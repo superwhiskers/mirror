@@ -40,3 +40,21 @@ impl FromRow for IncompleteMirrorChannelTableRow {
         })
     }
 }
+
+/// The type the response is parsed into when a mirroring task queries the usercache table
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncompleteUsercacheTableRow {
+    /// The username of the user in question
+    //NOTE: this does not cover services in which there is no canonical username for someone
+    pub username: String,
+
+    /// The user's avatar
+    pub avatar: Option<Vec<u8>>,
+}
+
+impl FromRow for IncompleteUsercacheTableRow {
+    fn from_row(row: Row) -> Result<Self, FromRowError> {
+        let (username, avatar) = row.into_typed::<(String, Option<Vec<u8>>)>()?;
+        Ok(Self { username, avatar })
+    }
+}
